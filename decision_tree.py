@@ -5,15 +5,19 @@ class decision_tree:
     __is_leaf = True
     __classification_label = ""
     __classification_attr = ""
+    splitpoint = None
 
     def __init__(self):
         self.__node_attribute = ""
 
-    def __init__(self, name):
-        self.__node_attribute = name
-
     def assign_node_name(self, name):
         self.__node_attribute = name
+
+    def assign_node_index(self, ind):
+        self.__node_index = ind
+
+    def get_node_index(self):
+        return self.__node_index
 
     def assign_class_label(self, label):
         self.__classification_label = label
@@ -34,6 +38,10 @@ class decision_tree:
     def get_node_name(self):
         return self.__node_attribute
 
+    def change_to_leaf_node(self):
+        self.__is_leaf = True
+        self.__splitting_criterias = {}
+
     def initialize_criterias(self, values):
         self.__splitting_criterias = {value: "" for value in values}
 
@@ -51,14 +59,3 @@ class decision_tree:
     def add_child(self, condition, child):
         self.__splitting_criterias[condition] = child
         self.__is_leaf = False
-
-    def traverse_decision_tree(self, condition):
-        if self.__is_leaf:
-            return False
-        try:
-            x = self.__children[self.__splitting_criterias.index()]
-            return x
-        except:
-            pass
-        finally:
-            return

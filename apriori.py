@@ -3,6 +3,9 @@ import sys
 import numpy as np
 from itertools import combinations, permutations
 
+'''
+Classification using Apriori pruning method
+'''
 
 dataframe = pandas.read_excel("./sampledataApriori.xlsx")
 rows = [tuple(dataframe.loc[i, "Item Bought"].replace(
@@ -91,7 +94,7 @@ def apriori_prune(selection):
         print("Apriori iteration: {i}  ---------- Current supported candidates: {l}".format(
             i=curr_size, l=supported))
         curr_size += 1
-        selection = superset(supported, curr_size)
+        selection = superset(testing_set, curr_size)
     return supported
 
 
