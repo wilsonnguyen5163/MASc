@@ -276,7 +276,7 @@ class K_means(Clustering):
                 self.clusters[i].update_centroid_mean()
         has_changed = True
         num_iteration = 0
-        while has_changed or num_iteration > self.num_iterations:
+        while has_changed or num_iteration < self.num_iterations:
             has_changed = False
             for cluster in self.clusters:
                 cluster.clear()

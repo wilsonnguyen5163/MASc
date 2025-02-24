@@ -231,6 +231,8 @@ class ClassificationGINI(ClassificationDecisionTree):
             indices = numpy.random.choice(
                 range(len(features)), size=subfeature_size, replace=False)
             # Choose best among k features to branch tree
+            # This does not modify actual object's feature structure, rather to choose among the
+            # subset of attributes for the best branching attribute
             subf = [features[i]
                     if i in indices else None for i in range(len(features))]
             (best_split_attribute_ind, split_criterion) = ClassificationGINI.attribute_selection(
