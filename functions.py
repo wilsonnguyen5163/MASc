@@ -4,8 +4,11 @@ import datetime
 import os
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
+from imblearn.over_sampling import SMOTE
+from tensorflow.keras.metrics import Precision, Recall
 from sklearn.metrics import precision_recall_curve, average_precision_score, roc_curve, roc_auc_score
-from keras.metrics import BinaryAccuracy, Precision, Recall, AUC
+from sklearn.model_selection import train_test_split
+import ast
 
 
 def load_spain_electrical_dataset():
@@ -123,6 +126,11 @@ def load_SGCC_dataset():
     return X_full, y_full
 
 def load_SMD(group, group_index):
+    """
+    Load Server Machine Dataset
+    
+    Returns: X_train, y_train, X_test, y_test
+    """
     path = "Dataset\MTS datasets\ServerMachineDataset"
     machine = "machine-{}-{}.csv".format(group, group_index)
     
@@ -161,6 +169,184 @@ def load_KDD():
     X_test, y_test = test_set.iloc[:,:-1], test_set.iloc[:,-1]
     
     return X_train, y_train, X_test, y_test
+
+def load_PSM():
+    """
+    Load Pooled Server Metrics MTS dataset from eBay  
+    
+    Training set does not contain label, assumed to be exclusively normals
+    
+    Returns: X_train, _,  X_test, y_test
+    """
+    path="Dataset\MTS datasets\PooledServerMetrics"
+    train_path = os.path.join(path, 'train.csv')
+    test_path = os.path.join(path, 'test.csv')
+    test_label_path = os.path.join(path, 'test_label.csv')
+    
+    train_set = pd.read_csv(train_path).iloc[:, 1:]
+    test_set = pd.read_csv(test_path).iloc[:, 1:]
+    y_test = pd.read_csv(test_label_path).iloc[:,1:]
+    return train_set, None, test_set, y_test
+
+def load_SMAP_MSL(channel, id):
+    """
+    Load SMAP / MSL dataset from NASA
+    Requires channel-id for the respective telemetry data
+    
+    Train set is assumed exclusively normal
+    
+    Returns: X_train, X_test, y_test
+    """
+    path="Dataset\MTS datasets\MSL_SMAP"
+    telemetry_sensor = f'{channel}-{id}.npy'
+    train_path = os.path.join(path, 'train', telemetry_sensor)
+    test_path = os.path.join(path, 'test', telemetry_sensor)
+    
+    train_set = np.load(train_path)
+    test_set = np.load(test_path)
+    descriptions = pd.read_csv(os.path.join(path, 'labeled_anomalies.csv'))
+    anomaly_intervals = ast.literal_eval(descriptions[descriptions['chan_id']==f'{channel}-{id}']['anomaly_sequences'].to_numpy()[0])
+    labels = np.zeros_like(test_set[:,0],dtype=int)
+    for (l, h) in anomaly_intervals:
+        labels[l:h+1] = 1
+
+    return pd.DataFrame(train_set), None,  pd.DataFrame(test_set), pd.DataFrame(labels)
+
+def load_DMDS_mixed_anomalies(train_sel, test_sel):
+    """
+    selections:  
+        1: Oct 30, 2001
+        2: Nov 9, 2001
+        3: Nov 17, 2001
+        4: Nov 20, 2001
+        
+    Dataset is not normalized
+    Returns: X_train, y_train, X_test, y_test
+    """
+    selection_dict ={
+        1: '30102001.txt',
+        2: '09112001.txt',
+        3: '17112001.txt',
+        4: '20112001.txt',
+    }
+    label_dict = {
+        1 : [[58800, 59800], [57340, 57890]],
+        2 : [[57275, 57550], [58830, 58930], [58520, 58625], [60650, 60700], [60870, 60960]],
+        3 : [[54600, 54700], [56670,56770], [53780,53794], [54193,54215], [55482,55517], [55977,56015], [57030,57072], [57475,57530], [57675,57800], [58150,58325]],
+        4 : [[37780, 38400], [44400, -1]]
+    }
+    path = "Dataset\MTS datasets\DMDS"
+    train_path = os.path.join(path, selection_dict[train_sel])
+    test_path = os.path.join(path, selection_dict[test_sel])
+    
+    train_set = pd.read_csv(train_path, delim_whitespace=True, header=None)
+    test_set = pd.read_csv(test_path, delim_whitespace=True, header=None)
+    y_train = np.zeros(len(train_set), dtype=int)
+    y_test = np.zeros(len(test_set), dtype=int)
+    
+    for (left, right) in label_dict[test_sel]:
+        y_test[left:right+1] = 1
+    
+    for (left, right) in label_dict[train_sel]:
+        y_train[left:right+1] = 1
+    
+    return train_set.drop(columns=[train_set.columns[0]]), y_train, test_set.drop(columns=[test_set.columns[0]]), y_test
+
+
+def load_creditcard():
+    """
+    Load Credit Card Fraud Detection dataset    
+    
+    __return__:  
+        X_train, y_train, X_test, y_test
+    """
+    
+    path = "Dataset\MTS datasets\CreditCard\creditcard.csv"
+    ds_full = pd.read_csv(path)
+    y_full = ds_full["Class"]
+    ds_full = ds_full.drop(columns=["Time", "Class"], axis=1)
+    X_train, X_test, y_train, y_test = train_test_split(ds_full, y_full, test_size=0.3, random_state=42, stratify=y_full, shuffle=True)
+    return X_train, y_train, X_test, y_test
+    
+def load_genesis():
+    """
+    Load Credit Card Fraud Detection dataset   
+    
+    Returns:  
+        X_train, y_train, X_test, y_test
+    """
+    path = "Dataset\MTS datasets\Genesis\Genesis_AnomalyLabels.csv"
+    ds_full = pd.read_csv(path)
+    y_full = ds_full["Label"]
+    ds_full = ds_full.drop(['Timestamp', 'Label'], axis=1)
+    
+    X_train, X_test, y_train, y_test = train_test_split(ds_full, y_full, test_size=0.3, random_state=42, stratify=y_full)
+    return X_train, y_train, X_test, y_test
+
+def load_water_pump_sensor(retain_timestamp=False):
+    """
+    Load water pump sensor dataset  
+    
+    All rows contains some sort of missing values
+    
+    Returns:
+        X_train, y_train, X_test, y_test
+    """
+    path = 'Dataset\MTS datasets\Water Pump Sensor Data\sensor.csv'
+    ds_full = pd.read_csv(path)
+    y_full = ds_full['machine_status'].map(lambda x : 0 if x=="NORMAL" else 1)
+    if retain_timestamp:
+        ds_full = ds_full.drop([ds_full.columns[0]], axis=1)
+        ds_full['timestamp'] = pd.to_datetime(ds_full['timestamp'])
+    else:  
+        ds_full = ds_full.drop([ds_full.columns[0], 'timestamp'], axis=1)
+    X_train, X_test, y_train, y_test = train_test_split(ds_full, y_full, test_size=0.3, random_state=42, stratify=y_full)
+    return X_train, y_train, X_test, y_test
+
+def inject_anomalies_from_testset(trainset:pd.DataFrame, testset:pd.DataFrame, test_labels, anomaly_ratio, random_state=42):
+    """
+    Assume trainset is free of anomaly, generates synthetic anomalies similar to those in test set and inject into train set  
+    
+    Returns: injected_X_set, injected_y_set
+    """
+    abnormals = testset.loc[test_labels==1]
+    X_combined = pd.concat([trainset, abnormals], ignore_index=True)
+    y_combined = np.concatenate([np.zeros(len(trainset), dtype=int), np.ones(len(abnormals), dtype=int)])
+    smote = SMOTE(sampling_strategy={1: (len(abnormals) + int(np.floor(anomaly_ratio*len(trainset))))}, random_state=random_state)
+    X_res, y_res = smote.fit_resample(X_combined, y_combined)
+    X_res = pd.DataFrame(X_res, columns=trainset.columns)
+    y_res = np.asarray(y_res, dtype=int)
+    
+    total_abnormals = int((y_res == 1).sum())
+    synthetic_abnormal_count = total_abnormals - len(abnormals)
+    abnormal_indices = np.where(y_res == 1)[0]
+    synthetic_abnormal_indices = abnormal_indices[-synthetic_abnormal_count:]
+    synthetic_abnormals = X_res.iloc[synthetic_abnormal_indices].reset_index(drop=True)
+    
+    n_to_inject = len(synthetic_abnormals)
+    total_length = len(trainset) + n_to_inject
+    positions = np.arange(total_length)
+    insert_position = np.random.RandomState(random_state).choice(positions, size=len(synthetic_abnormals), replace=False)
+    insert_position.sort()
+    
+    normals = trainset.reset_index(drop=True)
+    final_rows = []
+    final_labels = []
+    n_idx = 0  # pointer in normals
+    a_idx = 0  # pointer in anomalies
+    for pos in range(total_length):
+        if a_idx < n_to_inject and pos == insert_position[a_idx]:
+            final_rows.append(synthetic_abnormals.iloc[a_idx])
+            final_labels.append(1)
+            a_idx += 1
+        else:
+            final_rows.append(normals.iloc[n_idx])
+            final_labels.append(0)
+            n_idx += 1
+
+    injected_train = pd.DataFrame(final_rows).reset_index(drop=True)
+    injected_labels = np.array(final_labels, dtype=int)
+    return injected_train, injected_labels 
 
 def downsample(dataset, labels, normal_label, anomaly_ratio, random_state=42):
     normals = dataset.loc[labels==normal_label]
