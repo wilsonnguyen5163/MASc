@@ -43,7 +43,7 @@ class CTAD(keras.models.Model):
         self.optimizer = optimizer
 
     def call(self, x, training=False):
-        return self.model(x, training=True)
+        return self.model(x, training=training)
 
     def create_augments(self, batch_windows, nv=10, p=0.5, random_state=123):
         if isinstance(batch_windows, tf.Tensor):
@@ -73,7 +73,7 @@ class CTAD(keras.models.Model):
         self.nv_neg_aug1 = nv_neg1
         self.nv_neg_aug2 = nv_neg2
         self.p_pos1 = p_pos1
-        self.p_pos2 = p_pos1
+        self.p_pos2 = p_pos2
         self.p_neg1 = p_neg1
         self.p_neg2 = p_neg2
         self.noise_sigma = noise_sigma
