@@ -170,7 +170,7 @@ class CTAD(keras.models.Model):
 
         @tf.function
         def val_step(full_batch, N):
-            Z = self(full_batch, training=True)
+            Z = self(full_batch, training=False)
             loss = self.compute_loss(Z, N, tau=0.1)
             val_losses.update_state(loss)
             return loss
