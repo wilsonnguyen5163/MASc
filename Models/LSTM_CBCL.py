@@ -18,7 +18,7 @@ class MLPProjector(keras.layers.Layer):
         self.model = keras.Sequential([
             keras.layers.Dense(hidden_units),
             keras.layers.BatchNormalization(),
-            keras.layers.ReLU(),
+            keras.layers.LeakyReLU(alpha=leaky_alpha),
             keras.layers.Dense(out_dim),
         ])
         
@@ -75,7 +75,7 @@ class StackedDecoder(keras.layers.Layer):
 
 class LSTM_CBCL(keras.Model):
     def __init__(self, timesteps, n_features, latent_dim, num_layers=2, bottleneck=True, hidden_units = 64,
-                 dropout_rate=0.2, kernel_regularizer=False, batch_size=128, patience=5, recurrent_regularizer=True):
+                 dropout_rate=0.2, kernel_regularizer=False, batch_size=128, patience=5, recurrent_regularizer=True, MLP_hu=128, rep_dim=128):
         super().__init__()
         self.batch_size=batch_size
         self.encoder = StackedEncoder(num_hidden_layers=num_layers, bottleneck=bottleneck, hidden_units=hidden_units,
@@ -88,7 +88,7 @@ class LSTM_CBCL(keras.Model):
                                       kernel_regularizer=tf.keras.regularizers.L2(1e-4) if kernel_regularizer else None, 
                                       recurrent_regularizer=tf.keras.regularizers.L2(1e-4) if recurrent_regularizer else None)
         
-        self.projector_head = MLPProjector(hidden_units=128, out_dim=128, use_bias=True, leaky_alpha=0.1)
+        self.projector_head = MLPProjector(hidden_units=MLP_hu, out_dim=rep_dim, use_bias=True, leaky_alpha=0.1)
         
         self.pos_aug1 = functions.AnomalyWindowSampler().augment_noise
         self.pos_aug2 = functions.AnomalyWindowSampler().augment_dropout_point
@@ -256,7 +256,7 @@ class LSTM_CBCL(keras.Model):
             self.centroid.assign(self.ema_momentum * self.centroid.read_value() + (1.0-self.ema_momentum) * batch_mean)
             
             train_losses.update_state(total_loss)
-            return total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss
+            return total_loss, self.weight_mse * mse_loss, self.weight_contrast * contrast_loss, self.weight_centroid * centroid_loss, self.weight_repel * hinge_loss
 
         @tf.function
         def val_step(pos_batch, neg_batch):
