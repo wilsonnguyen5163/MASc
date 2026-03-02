@@ -18,7 +18,7 @@ class MLPProjector(keras.layers.Layer):
         self.model = keras.Sequential([
             keras.layers.Dense(hidden_units),
             keras.layers.BatchNormalization(),
-            keras.layers.LeakyReLU(alpha=leaky_alpha),
+            keras.layers.ReLU(),
             keras.layers.Dense(out_dim),
         ])
         
@@ -58,8 +58,8 @@ class StackedDecoder(keras.layers.Layer):
         self.output_dim = out_dim 
         self.layers = [keras.layers.RepeatVector(timesteps)]
         
-        for i in range(num_hidden_layers, 1, -1):
-            hu = int(hidden_units / i) if bottleneck else hidden_units
+        for i in range(num_hidden_layers-1, -1, -1):
+            hu = int(hidden_units / (i+1)) if bottleneck else hidden_units
             self.layers.append(
                 keras.layers.LSTM(hu, return_sequences=True, kernel_initializer=tf.keras.initializers.GlorotUniform(), dropout=dropout_rate,
                                   recurrent_initializer=tf.keras.initializers.Orthogonal(), kernel_regularizer=kernel_regularizer,
@@ -97,10 +97,10 @@ class LSTM_CBCL(keras.Model):
         
         self.centroid = None
         self.weight_mse = 1.0
-        self.weight_contrast = 0.1
-        self.weight_centroid = 0.05
-        self.weight_repel = 0.01
-        self.ema_momentum = 0.98
+        self.weight_contrast = 0.3
+        self.weight_centroid = 0.1
+        self.weight_repel = 0.15
+        self.ema_momentum = 0.95
         self.clip_norm=5
         self.patience = patience
         
@@ -124,14 +124,16 @@ class LSTM_CBCL(keras.Model):
         # produce two positive views (these should preserve "normal" semantics)
         pos1 = self.pos_aug1(batch_windows, nv=self.nv_pos_aug1, p=self.p_pos1,
                              sigma=self.noise_sigma, random_state=random_state)
+        
         pos2 = self.pos_aug2(batch_windows, nv=self.nv_pos_aug2, p=self.p_pos2,
                              random_state=random_state + 1)
-
+        
         # produce two negative (anomalous) views (these should make "bad" examples)
-        neg1 = self.neg_aug1(batch_windows, nv=self.nv_neg_aug1, p=self.p_pos1,
+        neg1 = self.neg_aug1(batch_windows, nv=self.nv_neg_aug1, p=self.p_neg1,
                              bias=self.bias, random_state=random_state + 2)
-        neg2 = self.neg_aug2(batch_windows, nv=self.nv_neg_aug2, p=self.p_pos2,
-                             amp_val=self.amp, random_state=random_state + 3)
+        
+        neg2 = self.neg_aug2(batch_windows, nv=self.nv_neg_aug2, p=self.p_neg2,
+                             amp_val=self.amp, random_state=random_state + 3) 
 
         pos_batch = np.concatenate([pos1, pos2], axis=0)
         neg_batch = np.concatenate([neg1, neg2], axis=0)
@@ -151,6 +153,16 @@ class LSTM_CBCL(keras.Model):
         self.bias = bias
         self.amp = amp
         
+    def linear_tau_scheduler(self, epoch, base_tau=0.5, min_tau=0.05, last_epoch=50):
+        if epoch > last_epoch:
+            return min_tau
+        return base_tau - (base_tau - min_tau) * (epoch / last_epoch)
+    
+    def cosine_tau_scheduler(self, epoch, base_tau=0.5, min_tau=0.05, last_epoch=50):
+        # Example: cosine decay schedule
+        if epoch > last_epoch:
+            return min_tau
+        return min_tau + 0.5 * (base_tau - min_tau) * (1 + math.cos(math.pi * epoch / last_epoch))
     
     @tf.function
     def cosine_sim(self, Z):
@@ -163,36 +175,73 @@ class LSTM_CBCL(keras.Model):
         return loss
     
     @tf.function  
-    def contrastive_loss(self, pos_proj, neg_proj, tau=0.1):
-        parts = [pos_proj, neg_proj]
-        Z = tf.concat(parts, axis=0)
-        M = tf.shape(Z)[0]
-        sim = self.cosine_sim(Z)            # (M,M)
-        logits = sim / tau
-        
-        # mask self
-        large_neg = -1e9
-        logits_no_self = tf.linalg.set_diag(logits, tf.fill([M], large_neg))
-
-        log_probs = tf.nn.log_softmax(logits_no_self, axis=1)  # (M,M)
-        
+    def contrastive_loss(self, orig, pos_proj, neg_proj, tau=0.1):
+        pos_proj = tf.concat([orig, pos_proj], axis=0)   # first block = positives (orig + views)
+        Z = tf.concat([pos_proj, neg_proj], axis=0)      # full set
         Npos = tf.shape(pos_proj)[0]
-        idx = tf.range(M, dtype=tf.int32)
-        row = tf.expand_dims(idx, 1)
-        col = tf.expand_dims(idx, 0)
+        M = tf.shape(Z)[0]
 
-        both_in_first_block = tf.logical_and(tf.less(row, Npos), tf.less(col, Npos))
-        diag_eq = tf.equal(row, col)
-        pos_mask_bool = tf.logical_and(both_in_first_block, tf.logical_not(diag_eq))
-        mask_pos = tf.cast(pos_mask_bool, log_probs.dtype)  # (M,M)
+        # normalize
+        Z_norm = tf.math.l2_normalize(Z, axis=1)
+        anchors = tf.math.l2_normalize(pos_proj, axis=1)   # only anchors rows (Npos, D)
 
-        sum_log_prob_pos = tf.reduce_sum(log_probs * mask_pos, axis=1)  # (M,)
-        pos_count = tf.reduce_sum(mask_pos, axis=1)  # how many positives each anchor has
+        # anchor-to-all logits (Npos, M)
+        logits = tf.matmul(anchors, Z_norm, transpose_b=True) / tf.cast(tau, dtype=anchors.dtype)
 
+        # mask out self (anchor i to column i in Z)
+        large_neg = tf.constant(-1e9, dtype=logits.dtype)
+        # set the diagonal positions (the first Npos columns correspond to anchors themselves)
+        # Using set_diag is fine even if logits is non-square; it sets min(rows, cols) diag.
+        logits = tf.linalg.set_diag(logits, tf.fill([tf.shape(logits)[0]], large_neg))
+
+        log_probs = tf.nn.log_softmax(logits, axis=1)  # (Npos, M)
+
+        # positives are columns 0..Npos-1, excluding self diagonal
+        pos_block = tf.ones([Npos, Npos], dtype=log_probs.dtype) - tf.eye(Npos, dtype=log_probs.dtype)
+        rest_zeros = tf.zeros([Npos, M - Npos], dtype=log_probs.dtype)
+        mask_pos = tf.concat([pos_block, rest_zeros], axis=1)  # (Npos, M)
+
+        sum_log_prob_pos = tf.reduce_sum(log_probs * mask_pos, axis=1)      # (Npos,)
+        pos_count = tf.reduce_sum(mask_pos, axis=1)                        # should be Npos - 1 (or K*N - 1)
         mean_log_prob_per_row = sum_log_prob_pos / (pos_count + 1e-8)
-        anchor_mean_log_prob = mean_log_prob_per_row[:Npos]  # only anchors
-        loss = -tf.reduce_mean(anchor_mean_log_prob)
+        loss = -tf.reduce_mean(mean_log_prob_per_row)
         return loss
+    
+        """ ############## EXPERIMENTAL ###############
+        N = tf.shape(orig)[0]
+        view1, view2 = tf.split(pos_proj, 2, axis=0)    # each (N, D)
+        Z = tf.concat([orig, view1, view2, neg_proj], axis=0)
+        M = tf.shape(Z)[0]
+
+        # normalize
+        Z_norm = tf.math.l2_normalize(Z, axis=1)
+        anchors = tf.math.l2_normalize(orig, axis=1)    # (N, D)
+
+        logits = tf.matmul(anchors, Z_norm, transpose_b=True) / tf.cast(tau, dtype=anchors.dtype)  # (N, M)
+
+        # mask out self (orig[i] corresponds to column i in Z)
+        large_neg = tf.constant(-1e9, dtype=logits.dtype)
+        logits = tf.linalg.set_diag(logits, tf.fill([tf.shape(logits)[0]], large_neg))
+        log_probs = tf.nn.log_softmax(logits, axis=1)  # (N, M)
+
+        # compute positions of the two positive columns for each anchor i:
+        # columns: orig -> [0 .. N-1], view1 -> [N .. 2N-1], view2 -> [2N .. 3N-1]
+        col_view1 = tf.range(N, N + N, dtype=tf.int32)
+        col_view2 = tf.range(N + N, N + N + N, dtype=tf.int32)
+
+        # build mask_pos where mask_pos[i, col_view1[i]] = 1 and mask_pos[i, col_view2[i]] = 1
+        idx1 = tf.stack([tf.range(N, dtype=tf.int32), col_view1], axis=1)
+        idx2 = tf.stack([tf.range(N, dtype=tf.int32), col_view2], axis=1)
+        mask_pos = tf.zeros([N, M], dtype=log_probs.dtype)
+        mask_pos = tf.tensor_scatter_nd_update(mask_pos, idx1, tf.ones([N], dtype=log_probs.dtype))
+        mask_pos = tf.tensor_scatter_nd_update(mask_pos, idx2, tf.ones([N], dtype=log_probs.dtype))
+
+        log_prob_pos = tf.reduce_sum(log_probs * mask_pos, axis=1)   # (N,)
+        pos_count = tf.reduce_sum(mask_pos, axis=1)                  # should be 2 for all anchors
+        mean_log_prob = log_prob_pos / (pos_count + 1e-8)
+        loss = -tf.reduce_mean(mean_log_prob)
+        return loss """
+
         
     @tf.function
     def centroid_loss(self, pos_proj):
@@ -234,15 +283,16 @@ class LSTM_CBCL(keras.Model):
         self.compute_center(train_split.shuffle(10000).batch(self.batch_size, drop_remainder=True))
         
         @tf.function
-        def train_step(pos_batch, neg_batch, clipping=False):
+        def train_step(orig, pos_batch, neg_batch, clipping=False, tau=0.1):
             with tf.GradientTape() as tape:
                 pos_latents, pos_projected, pos_reconstructed = self(pos_batch, training=True)
                 neg_latents, neg_projected, neg_reconstructed = self(neg_batch, training=True)
+                orig_latents, orig_projected, orig_reconstructed = self(orig, training=True)
                 
-                mse_loss = self.reconstruction_loss(pos_batch, pos_reconstructed)
-                contrast_loss = self.contrastive_loss(pos_projected, neg_projected, tau=0.1)
+                mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
+                contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
                 centroid_loss = self.centroid_loss(pos_projected)
-                hinge_loss = self.hinge_repel(neg_projected, dist_repel=1.0)
+                hinge_loss = self.hinge_repel(neg_projected, dist_repel=1.5)
                 other_losses = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
                 total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_losses
             
@@ -259,14 +309,15 @@ class LSTM_CBCL(keras.Model):
             return total_loss, self.weight_mse * mse_loss, self.weight_contrast * contrast_loss, self.weight_centroid * centroid_loss, self.weight_repel * hinge_loss
 
         @tf.function
-        def val_step(pos_batch, neg_batch):
+        def val_step(orig, pos_batch, neg_batch, tau=0.1):
             pos_latents, pos_projected, pos_reconstructed = self(pos_batch, training=False)
             neg_latents, neg_projected, neg_reconstructed = self(neg_batch, training=False)
+            orig_latents, orig_projected, orig_reconstructed = self(orig, training=False)
             
-            mse_loss = self.reconstruction_loss(pos_batch, pos_reconstructed)
-            contrast_loss = self.contrastive_loss(pos_projected, neg_projected, tau=0.1)
+            mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
+            contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
             centroid_loss = self.centroid_loss(pos_projected)
-            hinge_loss = self.hinge_repel(neg_projected, dist_repel=1.0)
+            hinge_loss = self.hinge_repel(neg_projected, dist_repel=1.5)
             other_loss = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
             total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_loss
             
@@ -280,12 +331,13 @@ class LSTM_CBCL(keras.Model):
             for idx, batch in enumerate(train_ds):
                 batch_np = batch.numpy()
                 pos_batch, neg_batch = self.create_augments(batch_np)
-
                 pos_batch_tf = tf.convert_to_tensor(
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
                     neg_batch, dtype=tf.float32)
-                total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss = train_step(pos_batch_tf, neg_batch_tf, clipping=clipping)
+                #tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
+                tau = 0.1
+                total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss = train_step(batch, pos_batch_tf, neg_batch_tf, clipping=clipping, tau=tau)
 
             for idx, batch in enumerate(val_ds):
                 batch_np = batch.numpy()
@@ -295,7 +347,8 @@ class LSTM_CBCL(keras.Model):
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
                     neg_batch, dtype=tf.float32)
-                val_loss = val_step(pos_batch_tf, neg_batch_tf)
+                #tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
+                val_loss = val_step(batch, pos_batch_tf, neg_batch_tf, tau=0.1)
 
             cur_val = val_losses.result().numpy()
             if verbose:
@@ -315,7 +368,7 @@ class LSTM_CBCL(keras.Model):
                     ckpt.restore(manager.latest_checkpoint)
                     break
     
-    def score(self, data_ds):
+    def score(self, data_ds, use_mse=True):
         mse_scores = []
         cluster_scores = []
         ds = data_ds.batch(1024)
@@ -329,6 +382,7 @@ class LSTM_CBCL(keras.Model):
 
         mse_scores = np.array(mse_scores)
         cluster_scores = np.array(cluster_scores)
+        
         return cluster_scores
         #return mse_scores
         

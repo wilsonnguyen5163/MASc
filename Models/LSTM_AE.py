@@ -91,8 +91,6 @@ class LSTM_AE(keras.Model):
         def eval_step(x):
             reconstructed = self(x, training=False)
             loss = self.loss_fn(x, reconstructed)
-            if self.losses:
-                loss += tf.add_n(self.losses)
             val_losses.update_state(loss)
             return loss
 

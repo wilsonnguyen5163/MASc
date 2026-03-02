@@ -44,7 +44,7 @@ class IsolationForest_MTS():
             X_flat = np.concatenate(
                 [self._flatten_window(x.numpy()) for x in windows], axis=0)
         else:
-            X_flat = self._flatten_window(windows)
+            X_flat = self._flatten_windows(windows)
         # sklearn: lower decision_function -> more anomalous
         # decision_function returns higher = more normal; we invert to make higher = more anomalous
         df = self.model.decision_function(X_flat)        # higher = more normal
@@ -89,7 +89,7 @@ class PCA_AE_for_MTS:
             X_flat = np.concatenate(
                 [self._flatten_window(x.numpy()) for x in windows], axis=0)
         else:
-            X_flat = self._flatten_window(windows)
+            X_flat = self._flatten_windows(windows)
         # fit PCA
         self.pca.fit(X_flat)
         # store component variances for score distance (sd)

@@ -422,6 +422,31 @@ def get_time_series_between(start: datetime, end: datetime, time_column, data: p
     series = data[mask].copy()
     return series
 
+def make_lazy_windows(data, n_features, window_size, frame_step):
+    """
+    Create a tf.data.Dataset of sliding windows from the input data without materializing all windows in memory.
+
+    Args:
+        data (pd.DataFrame): Input time series data.
+        window_size (int): Size of each sliding window.
+        frame_step (int): Step size for sliding the window.
+    """
+    n = (len(data) - window_size) // frame_step + 1
+    # Use from_generator to avoid materializing all windows at once
+    def gen():
+        for i in range(0, len(data) - window_size + 1, frame_step):
+            yield data[i : i + window_size]
+    return tf.data.Dataset.from_generator(
+        gen,
+        output_signature=tf.TensorSpec(shape=(window_size, n_features), dtype=tf.float32)
+    )
+
+def make_label_array(data, window_size, frame_step):
+    """Window labels — small enough to keep in memory."""
+    labels = []
+    for i in range(0, len(data) - window_size + 1, frame_step):
+        labels.append(int(np.any(data[i : i + window_size] == 1)))
+    return np.array(labels, dtype=np.int32)
 
 def load_preprocessed_SMD_windows(server, machine, scaler=None, window_size=10, frame_step=1,):
     """
@@ -446,29 +471,17 @@ def load_preprocessed_SMD_windows(server, machine, scaler=None, window_size=10, 
     if scaler is not None:
         X_train_full = scaler.fit_transform(X_train_full)
         X_test_full = scaler.transform(X_test_full)
+    # Convert to float32 numpy once
+    X_train_full = X_train_full.astype(np.float32)
+    X_test_full  = X_test_full.astype(np.float32)
+    y_test_full  = y_test_full.astype(np.int32)
+    n_features = X_train_full.shape[1]
 
-    X_train_windows = tf.signal.frame(tf.convert_to_tensor(
-        X_train_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0)
-    X_test_windows = tf.signal.frame(tf.convert_to_tensor(
-        X_test_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0)
-    test_windows_labels = tf.signal.frame(tf.convert_to_tensor(
-        y_test_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0).numpy()
-    reshaped = test_windows_labels.reshape(test_windows_labels.shape[0], -1)
-    window_has_anom = np.any(reshaped == 1, axis=1).astype(np.int32)
+    train_ds   = make_lazy_windows(X_train_full, n_features, window_size, frame_step)
+    test_ds    = make_lazy_windows(X_test_full, n_features, window_size, frame_step)
+    test_labels = make_label_array(y_test_full, window_size, frame_step)
 
-    X_train_windows = tf.convert_to_tensor(
-        X_train_windows, dtype=tf.float32)           # [N, T, F]
-    X_test_windows = tf.convert_to_tensor(
-        X_test_windows, dtype=tf.float32)       # [N, T, F]
-    y_test_windows = tf.convert_to_tensor(
-        window_has_anom, dtype=tf.int32)      # [N]
-    train_ds = tf.data.Dataset.from_tensor_slices(
-        tf.cast(X_train_windows, tf.float32))
-    test_ds = tf.data.Dataset.from_tensor_slices(
-        tf.cast(X_test_windows, tf.float32))
-    test_labels = tf.cast(y_test_windows, tf.int32)
-
-    return train_ds, test_ds, test_labels.numpy()
+    return train_ds, test_ds, test_labels
 
 
 def load_preprocessed_PSM_windows(scaler=None, window_size=10, frame_step=1, lazy=False):
@@ -490,51 +503,17 @@ def load_preprocessed_PSM_windows(scaler=None, window_size=10, frame_step=1, laz
     if scaler is not None:
         X_train_full = scaler.fit_transform(X_train_full)
         X_test_full = scaler.transform(X_test_full)
+        
+    X_train_full = X_train_full.astype(np.float32)
+    X_test_full  = X_test_full.astype(np.float32)
+    y_test_full  = y_test_full.astype(np.int32)
+    n_features = X_train_full.shape[1]
 
-    if not lazy:
-        X_train_windows = tf.signal.frame(tf.convert_to_tensor(
-            X_train_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0)
-        X_test_windows = tf.signal.frame(tf.convert_to_tensor(
-            X_test_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0)
-        test_windows_labels = tf.signal.frame(tf.convert_to_tensor(
-            y_test_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0).numpy()
-        reshaped = test_windows_labels.reshape(
-            test_windows_labels.shape[0], -1)
-        window_has_anom = np.any(reshaped == 1, axis=1).astype(np.int32)
+    train_ds   = make_lazy_windows(X_train_full, n_features, window_size, frame_step)
+    test_ds    = make_lazy_windows(X_test_full, n_features, window_size, frame_step)
+    test_labels = make_label_array(y_test_full, window_size, frame_step)
 
-        X_train_windows = tf.convert_to_tensor(
-            X_train_windows, dtype=tf.float32)           # [N, T, F]
-        X_test_windows = tf.convert_to_tensor(
-            X_test_windows, dtype=tf.float32)       # [N, T, F]
-        y_test_windows = tf.convert_to_tensor(
-            window_has_anom, dtype=tf.int32)      # [N]
-        train_ds = tf.data.Dataset.from_tensor_slices(
-            tf.cast(X_train_windows, tf.float32))
-        test_ds = tf.data.Dataset.from_tensor_slices(
-            tf.cast(X_test_windows, tf.float32))
-        test_labels = tf.cast(y_test_windows, tf.int32)
-        return train_ds, test_ds, test_labels.numpy()
-
-    else:
-        X_train_full = tf.convert_to_tensor(X_train_full, tf.float32)
-        X_test_full = tf.convert_to_tensor(X_test_full, tf.float32)
-        y_test_full = tf.convert_to_tensor(y_test_full, tf.int32)
-
-        train_ds = (tf.data.Dataset.from_tensor_slices(X_train_full).window(
-            window_size, shift=frame_step, drop_remainder=True).flat_map(lambda w: w.batch(window_size))).shuffle(10000)
-        test_ds = (tf.data.Dataset.from_tensor_slices(X_test_full).window(
-            window_size, shift=frame_step, drop_remainder=True).flat_map(lambda w: w.batch(window_size)))
-
-        test_y_ds = (
-            tf.data.Dataset.from_tensor_slices(y_test_full)
-            .window(window_size, shift=frame_step, drop_remainder=True)
-            .flat_map(lambda w: w.batch(window_size))
-            .map(lambda w: tf.cast(tf.reduce_any(w == 1), tf.int32))
-        )
-        window_labels = np.array(
-            [int(v) for v in test_y_ds.as_numpy_iterator()], dtype=np.int32)
-
-        return train_ds, test_ds, window_labels
+    return train_ds, test_ds, test_labels
 
 
 def load_preprocessed_MSL_SMAP_windows(entity, entity_num, scaler=None, window_size=10, frame_step=1):
@@ -559,27 +538,16 @@ def load_preprocessed_MSL_SMAP_windows(entity, entity_num, scaler=None, window_s
         X_train_full = scaler.fit_transform(X_train_full)
         X_test_full = scaler.transform(X_test_full)
 
-    X_train_windows = tf.signal.frame(tf.convert_to_tensor(
-        X_train_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0)
-    X_test_windows = tf.signal.frame(tf.convert_to_tensor(
-        X_test_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0)
-    test_windows_labels = tf.signal.frame(tf.convert_to_tensor(
-        y_test_full, dtype=tf.float32), frame_length=window_size, frame_step=frame_step, axis=0).numpy()
-    reshaped = test_windows_labels.reshape(test_windows_labels.shape[0], -1)
-    window_has_anom = np.any(reshaped == 1, axis=1).astype(np.int32)
+    X_train_full = X_train_full.astype(np.float32)
+    X_test_full  = X_test_full.astype(np.float32)
+    y_test_full  = y_test_full.astype(np.int32)
+    n_features = X_train_full.shape[1]
 
-    X_train_windows = tf.convert_to_tensor(
-        X_train_windows, dtype=tf.float32)           # [N, T, F]
-    X_test_windows = tf.convert_to_tensor(
-        X_test_windows, dtype=tf.float32)       # [N, T, F]
-    y_test_windows = tf.convert_to_tensor(
-        window_has_anom, dtype=tf.int32)      # [N]
-    train_ds = tf.data.Dataset.from_tensor_slices(
-        tf.cast(X_train_windows, tf.float32))
-    test_ds = tf.data.Dataset.from_tensor_slices(
-        tf.cast(X_test_windows, tf.float32))
-    test_labels = tf.cast(y_test_windows, tf.int32)
-    return train_ds, test_ds, test_labels.numpy()
+    train_ds   = make_lazy_windows(X_train_full, n_features, window_size, frame_step)
+    test_ds    = make_lazy_windows(X_test_full, n_features, window_size, frame_step)
+    test_labels = make_label_array(y_test_full, window_size, frame_step)
+
+    return train_ds, test_ds, test_labels
 
 
 def load_preprocessed_WADI_windows(scaler=None, window_size=10, frame_step=1, max_windows=100000):
@@ -602,27 +570,16 @@ def load_preprocessed_WADI_windows(scaler=None, window_size=10, frame_step=1, ma
         X_train_full = scaler.fit_transform(X_train_full)
         X_test_full = scaler.transform(X_test_full)
 
-    X_train_full = tf.convert_to_tensor(X_train_full, tf.float32)
-    X_test_full = tf.convert_to_tensor(X_test_full, tf.float32)
-    y_test_full = tf.convert_to_tensor(y_test_full, tf.int32)
+    X_train_full = X_train_full.astype(np.float32)
+    X_test_full  = X_test_full.astype(np.float32)
+    y_test_full  = y_test_full.astype(np.int32)
+    n_features = X_train_full.shape[1]
 
-    train_ds = (tf.data.Dataset.from_tensor_slices(X_train_full).window(
-        window_size, shift=frame_step, drop_remainder=True).flat_map(lambda w: w.batch(window_size))).shuffle(10000)
-    test_ds = (tf.data.Dataset.from_tensor_slices(X_test_full).window(
-        window_size, shift=frame_step, drop_remainder=True).flat_map(lambda w: w.batch(window_size)))
+    train_ds   = make_lazy_windows(X_train_full, n_features, window_size, frame_step)
+    test_ds    = make_lazy_windows(X_test_full, n_features, window_size, frame_step)
+    test_labels = make_label_array(y_test_full, window_size, frame_step)
 
-    test_y_ds = (
-        tf.data.Dataset.from_tensor_slices(y_test_full)
-        .window(window_size, shift=frame_step, drop_remainder=True)
-        .flat_map(lambda w: w.batch(window_size))
-        .map(lambda w: tf.cast(tf.reduce_any(w == 1), tf.int32))
-    )
-    window_labels = np.array(
-        [int(v) for v in test_y_ds.as_numpy_iterator()], dtype=np.int32)
-
-    train_ds = train_ds.take(max_windows)
-
-    return train_ds, test_ds, window_labels
+    return train_ds, test_ds, test_labels
 
 
 class AnomalyWindowSampler():
@@ -832,7 +789,26 @@ def point_adjust(y_true, y_pred):
 
             if np.any(y_pred[start:end] == 1):
                 adjusted[start:end] = 1
+                
     if in_anomaly:
         if np.any(y_pred[start:] == 1):
             adjusted[start:] = 1
+    return adjusted
+
+def point_adjust_score(y_true, y_scores):
+    adjusted = y_scores.copy()
+    in_anomaly = False
+    start = 0
+    for i in range(len(y_true)):
+        if y_true[i] == 1 and not in_anomaly:
+            in_anomaly = True
+            start = i
+        if y_true[i] == 0 and in_anomaly:
+            in_anomaly = False
+            end = i
+
+            adjusted[start:end] = np.max(y_scores[start:end])
+                
+    if in_anomaly:
+        adjusted[start:] = np.max(y_scores[start:])
     return adjusted

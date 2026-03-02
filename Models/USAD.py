@@ -46,7 +46,8 @@ class USAD_MTS(keras.Model):
 
     def compile(self, optimizer, clipnorm=1.0, early_stop_patience=5, **kwargs):
         super().compile(optimizer=optimizer, **kwargs)
-        self.optimizer = optimizer
+        self.optimizer1 = keras.optimizers.Adam(learning_rate=1e-4)
+        self.optimizer2 = keras.optimizers.Adam(learning_rate=1e-4)
         self.clipnorm = clipnorm
         self.early_stop_patience = early_stop_patience
 
@@ -77,25 +78,42 @@ class USAD_MTS(keras.Model):
                 x1_hat = self.decoder1(z, training=True)
                 loss1 = tf.reduce_mean(tf.reduce_sum(
                     tf.square(x - x1_hat), axis=[1, 2]))
-            vars_d1 = self.encoder.trainable_variables + self.decoder1.trainable_variables
-            grads1 = tape1.gradient(loss1, vars_d1)
-            # grads1, _ = tf.clip_by_global_norm(grads1, self.clipnorm)
-            self.optimizer.apply_gradients(zip(grads1, vars_d1))
+            vars_ae1 = self.encoder.trainable_variables + self.decoder1.trainable_variables
+            grads1 = tape1.gradient(loss1, vars_ae1)
+            self.optimizer1.apply_gradients(zip(grads1, vars_ae1))
 
-            with tf.GradientTape() as tape2:
-                z = self.encoder(x, training=False)
-                x1_hat = self.decoder1(z, training=False)
-                x1_hat = tf.stop_gradient(x1_hat)
-                z_hat = self.encoder(x1_hat, training=False)
+            with tf.GradientTape(persistent=True) as tape2:
+                z = self.encoder(x, training=True)
+                x1_hat = self.decoder1(z, training=True)
+
+                # AE2 forward on AE1's reconstruction
+                z_hat = self.encoder(x1_hat, training=True)
                 x2_hat = self.decoder2(z_hat, training=True)
-                loss2 = tf.reduce_mean(tf.reduce_sum(
+
+                # Adversarial loss (AE2 trying to reconstruct original from AE1 output)
+                loss2_adv = tf.reduce_mean(tf.reduce_sum(
                     tf.square(x - x2_hat), axis=[1, 2]))
-            grads2 = tape2.gradient(loss2, self.decoder2.trainable_variables)
-            # grads2, _ = tf.clip_by_global_norm(grads2, self.clipnorm)
-            self.optimizer.apply_gradients(
-                zip(grads2, self.decoder2.trainable_variables))
-            train_losses.update_state(loss1 + loss2)
-            return loss1, loss2
+
+                # AE1 adversarial objective: fool AE2 → minimize (L1 - L2_adv)
+                # i.e. AE1 wants its output to be hard for AE2 to reconstruct
+                loss1_adv = tf.reduce_mean(tf.reduce_sum(
+                    tf.square(x - x1_hat), axis=[1, 2]))
+                ae1_adv_loss = loss1_adv - loss2_adv  # AE1 wants to minimize this
+               
+            # Update AE2 (encoder + decoder2): minimize loss2_adv
+            vars_ae2 = self.encoder.trainable_variables + self.decoder2.trainable_variables
+            grads_ae2 = tape2.gradient(loss2_adv, vars_ae2)
+            self.optimizer2.apply_gradients(zip(grads_ae2, vars_ae2))
+            
+            # Update AE1 (encoder + decoder1): minimize ae1_adv_loss
+            vars_ae1 = self.encoder.trainable_variables + self.decoder1.trainable_variables
+            grads_ae1 = tape2.gradient(ae1_adv_loss, vars_ae1)
+            self.optimizer1.apply_gradients(zip(grads_ae1, vars_ae1))
+
+            del tape2
+
+            train_losses.update_state(loss1 + loss2_adv)
+            return loss1, loss2_adv
 
         @tf.function
         def val_step(x):
@@ -107,9 +125,8 @@ class USAD_MTS(keras.Model):
                 tf.math.squared_difference(x, x1_hat), axis=[1, 2]))
             loss2 = tf.reduce_mean(tf.reduce_sum(
                 tf.math.squared_difference(x, x2_hat), axis=[1, 2]))
-            loss = loss1 + loss2
-            val_losses.update_state(loss)
-            return loss
+            val_losses.update_state(loss1+loss2)
+            return loss1, loss2
 
         wait = 0
         best_val_loss = float('inf')
@@ -138,7 +155,11 @@ class USAD_MTS(keras.Model):
                     ckpt.restore(manager.latest_checkpoint)
                     break
 
-    def score(self, data_ds):
+    def score(self, data_ds, alpha=0.5):
+        """
+        Anomaly score per the USAD paper:
+            score = (1 - alpha) * ||x - x1_hat||^2 + alpha * ||x - x2_hat||^2
+        """
         anomaly_scores = []
         data_ds = data_ds.batch(1024)
         for x in data_ds:
@@ -146,7 +167,9 @@ class USAD_MTS(keras.Model):
             x1_hat = self.decoder1(z, training=False)
             z_hat = self.encoder(x1_hat, training=False)
             x2_hat = self.decoder2(z_hat, training=False)
-            loss = tf.reduce_mean(
-                tf.math.squared_difference(x, x2_hat), axis=[1, 2])
-            anomaly_scores.extend(loss.numpy())
+
+            loss1 = tf.reduce_mean(tf.math.squared_difference(x, x1_hat), axis=[1, 2])
+            loss2 = tf.reduce_mean(tf.math.squared_difference(x, x2_hat), axis=[1, 2])
+            score = (1 - alpha) * loss1 + alpha * loss2
+            anomaly_scores.extend(score.numpy())
         return np.array(anomaly_scores)
