@@ -178,38 +178,7 @@ class LSTM_CBCL(keras.Model):
         return loss
     
     @tf.function  
-    def contrastive_loss(self, orig_proj, pos_proj, neg_proj, tau=0.1):
-        """ #pos_proj = tf.concat([orig_proj, pos_proj], axis=0)   # first block = positives (orig + views) # Can test removal of orig from positives block as an ablation
-        Z = tf.concat([pos_proj, neg_proj], axis=0)      # full set
-        Npos = tf.shape(pos_proj)[0]
-        M = tf.shape(Z)[0]
-
-        # normalize
-        Z_norm = tf.math.l2_normalize(Z, axis=1)
-        anchors = tf.math.l2_normalize(pos_proj, axis=1)   # only anchors rows (Npos, D)
-
-        # anchor-to-all logits (Npos, M)
-        logits = tf.matmul(anchors, Z_norm, transpose_b=True) / tf.cast(tau, dtype=anchors.dtype)
-
-        # mask out self (anchor i to column i in Z)
-        large_neg = tf.constant(-1e9, dtype=logits.dtype)
-        # set the diagonal positions (the first Npos columns correspond to anchors themselves)
-        # Using set_diag is fine even if logits is non-square; it sets min(rows, cols) diag.
-        logits = tf.linalg.set_diag(logits, tf.fill([tf.shape(logits)[0]], large_neg))
-
-        log_probs = tf.nn.log_softmax(logits, axis=1)  # (Npos, M)
-
-        # positives are columns 0..Npos-1, excluding self diagonal
-        pos_block = tf.ones([Npos, Npos], dtype=log_probs.dtype) - tf.eye(Npos, dtype=log_probs.dtype)
-        rest_zeros = tf.zeros([Npos, M - Npos], dtype=log_probs.dtype)
-        mask_pos = tf.concat([pos_block, rest_zeros], axis=1)  # (Npos, M)
-
-        sum_log_prob_pos = tf.reduce_sum(log_probs * mask_pos, axis=1)      # (Npos,)
-        pos_count = tf.reduce_sum(mask_pos, axis=1)                        # should be Npos - 1 (or K*N - 1)
-        mean_log_prob_per_row = sum_log_prob_pos / (pos_count + 1e-8)
-        loss = -tf.reduce_mean(mean_log_prob_per_row)
-        return loss """
-    
+    def contrastive_loss(self, orig_proj, pos_proj, neg_proj, tau=0.1):  
         ############## EXPERIMENTAL ###############
         N = tf.shape(orig_proj)[0]
         view1, view2 = tf.split(pos_proj, 2, axis=0)    # each (N, D)
@@ -272,16 +241,10 @@ class LSTM_CBCL(keras.Model):
         train_size = int(0.75 * card)
         train_split = train_ds.take(train_size)
         val_ds = train_ds.skip(train_size).batch(
-            self.batch_size, drop_remainder=True)
+            self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
         best_val_loss = float('inf')
         wait = 0
-        ckpt = tf.train.Checkpoint(
-            model=self,
-            optimizer=self.optimizer
-        )
-        manager = tf.train.CheckpointManager(
-            ckpt, './checkpoint_states/CTAD', max_to_keep=1)
 
         self.compute_center(train_split.shuffle(10000).batch(self.batch_size, drop_remainder=True))
         
@@ -329,8 +292,7 @@ class LSTM_CBCL(keras.Model):
         for e in range(epochs):
             train_losses.reset_states()
             val_losses.reset_states()
-            train_ds = train_split.shuffle(10000).batch(
-                self.batch_size, drop_remainder=True)
+            train_ds = train_split.shuffle(10000).batch(self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
             for idx, batch in enumerate(train_ds):
                 batch_np = batch.numpy()
                 pos_batch, neg_batch = self.create_augments(batch_np)
@@ -362,13 +324,11 @@ class LSTM_CBCL(keras.Model):
             if best_val_loss - cur_val > 1e-3:
                 best_val_loss = cur_val
                 wait = 0
-                manager.save()
             else:
                 wait += 1
                 if wait >= self.patience:
                     if verbose:
                         print("Early stopping.")
-                    ckpt.restore(manager.latest_checkpoint)
                     break
     
     def score(self, data_ds, use_mse=True):

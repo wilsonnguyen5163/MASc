@@ -15,14 +15,14 @@ class LSTM_AE(keras.Model):
         self.latent_dim = latent_dim
         self.batch_size = batch_size
         self.encoder = keras.Sequential([
-            keras.layers.LSTM(128, return_sequences=False, input_shape=(timesteps, n_features),
+            keras.layers.LSTM(64, return_sequences=False, input_shape=(timesteps, n_features),
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4) if use_recurrent_regularizer else None),
         ])
 
         self.decoder = keras.Sequential([
             keras.layers.RepeatVector(timesteps),
-            keras.layers.LSTM(128, return_sequences=True,
+            keras.layers.LSTM(64, return_sequences=True,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate, recurrent_regularizer=keras.regularizers.L2(1e-4) if use_recurrent_regularizer else None),
             keras.layers.TimeDistributed(
                 keras.layers.Dense(n_features, activation='linear'))
@@ -52,14 +52,7 @@ class LSTM_AE(keras.Model):
         train_size = int(0.8 * card)
         train_split = train_ds.take(train_size)
         val_split = train_ds.skip(train_size)
-        val_ds = val_split.batch(self.batch_size)
-
-        ckpt = tf.train.Checkpoint(
-            model=self,
-            optimizer=self.optimizer
-        )
-        manager = tf.train.CheckpointManager(
-            ckpt, './checkpoint_states/LSTM', max_to_keep=1)
+        val_ds = val_split.batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
 
         @tf.function
         def train_step(x):
@@ -91,7 +84,7 @@ class LSTM_AE(keras.Model):
         for epoch in range(epochs):
             train_losses.reset_state()
             val_losses.reset_state()
-            ds = train_split.shuffle(1000).batch(self.batch_size)
+            ds = train_split.shuffle(1000).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
             for x in ds:
                 train_step(x)
             for x in val_ds:
@@ -103,14 +96,12 @@ class LSTM_AE(keras.Model):
             # Early stopping logic can be added here based on val_losses
             if best_loss - val_losses.result() > 1e-4:
                 best_loss = val_losses.result()
-                manager.save()
                 wait = 0
             else:
                 wait += 1
                 if wait >= self.early_stop_patience:
                     if verbose > 0:
                         print("Early stopping ... ")
-                    ckpt.restore(manager.latest_checkpoint)
                     break
 
     def score(self, data_ds):

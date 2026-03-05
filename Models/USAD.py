@@ -11,14 +11,14 @@ class USAD_MTS(keras.Model):
         self.latent_dim = latent_dim
         self.batch_size = batch_size
         self.encoder = keras.Sequential([
-            keras.layers.LSTM(128, return_sequences=False,
+            keras.layers.LSTM(64, return_sequences=False,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
         ])
 
         self.decoder1 = keras.Sequential([
             keras.layers.RepeatVector(timesteps),
-            keras.layers.LSTM(128, return_sequences=True,
+            keras.layers.LSTM(64, return_sequences=True,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
             keras.layers.TimeDistributed(
@@ -27,7 +27,7 @@ class USAD_MTS(keras.Model):
 
         self.decoder2 = keras.Sequential([
             keras.layers.RepeatVector(timesteps),
-            keras.layers.LSTM(128, return_sequences=True,
+            keras.layers.LSTM(64, return_sequences=True,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
             keras.layers.TimeDistributed(
@@ -36,8 +36,8 @@ class USAD_MTS(keras.Model):
 
     def compile(self, optimizer, clipnorm=1.0, early_stop_patience=5, **kwargs):
         super().compile(optimizer=optimizer, **kwargs)
-        self.optimizer1 = keras.optimizers.Adam(learning_rate=1e-4)
-        self.optimizer2 = keras.optimizers.Adam(learning_rate=1e-4)
+        self.optimizer1 = keras.optimizers.Adam(learning_rate=5e-4)
+        self.optimizer2 = keras.optimizers.Adam(learning_rate=5e-4)
         self.clipnorm = clipnorm
         self.early_stop_patience = early_stop_patience
 
@@ -53,13 +53,7 @@ class USAD_MTS(keras.Model):
         train_size = int(0.8 * card)
         train_split = train_ds.take(train_size)
         val_split = train_ds.skip(train_size)
-        val_ds = val_split.batch(self.batch_size)
-        ckpt = tf.train.Checkpoint(
-            model=self,
-            optimizer=self.optimizer
-        )
-        manager = tf.train.CheckpointManager(
-            ckpt, './checkpoint_states/USAD', max_to_keep=1)
+        val_ds = val_split.batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
 
         @tf.function
         def train_step(x):
@@ -123,7 +117,7 @@ class USAD_MTS(keras.Model):
         for epoch in range(epochs):
             train_losses.reset_state()
             val_losses.reset_state()
-            train_ds = train_split.shuffle(1000).batch(self.batch_size)
+            train_ds = train_split.shuffle(1000).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
             for x in train_ds:
                 train_step(x)
             for x in val_ds:
@@ -135,14 +129,12 @@ class USAD_MTS(keras.Model):
             # Early stopping logic can be added here based on val_losses
             if best_val_loss - val_losses.result() > 1e-4:
                 best_val_loss = val_losses.result()
-                manager.save()
                 wait = 0
             else:
                 wait += 1
                 if wait >= early_stop_patience:
                     if verbose > 0:
                         print("Early stopping ... ")
-                    ckpt.restore(manager.latest_checkpoint)
                     break
 
     def score(self, data_ds, alpha=0.5):

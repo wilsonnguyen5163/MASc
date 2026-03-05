@@ -174,16 +174,10 @@ class DAGMM_AE(keras.Model):
                 card += 1
         train_size = int(0.8 * card)
         train_split = train_ds.take(train_size)
-        val_ds = train_ds.skip(train_size).batch(self.batch_size)
+        val_ds = train_ds.skip(train_size).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
 
         best_val_loss = float('inf')
         wait = 0
-        ckpt = tf.train.Checkpoint(
-            model=self,
-            optimizer=self.optimizer
-        )
-        manager = tf.train.CheckpointManager(
-            ckpt, './checkpoint_states/DAGMM', max_to_keep=1)
 
         @tf.function
         def train_step(x):
@@ -228,7 +222,7 @@ class DAGMM_AE(keras.Model):
         for epoch in range(epochs):
             train_losses.reset_state()
             val_losses.reset_state()
-            train_ds = train_split.shuffle(1000).batch(self.batch_size)
+            train_ds = train_split.shuffle(1000).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
             for x in train_ds:
                 train_step(x)
             for x in val_ds:
@@ -239,14 +233,12 @@ class DAGMM_AE(keras.Model):
                     f"\t Train Loss: {train_losses.result():.6f} | Val Loss: {val_losses.result():.6f}")
             if best_val_loss - val_losses.result() > 1e-4:
                 best_val_loss = val_losses.result()
-                manager.save()
                 wait = 0
             else:
                 wait += 1
                 if wait >= self.early_stop_patience:
                     if verbose > 0:
                         print("Early stopping ... ")
-                    ckpt.restore(manager.latest_checkpoint)
                     break
 
     def score(self, data_ds):

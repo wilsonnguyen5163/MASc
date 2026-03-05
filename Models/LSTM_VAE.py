@@ -100,11 +100,6 @@ class LSTM_VAE(keras.Model):
         val_losses = keras.metrics.Mean(name='val_loss')
         self.epochs = epochs
 
-        ckpt = tf.train.Checkpoint(
-            model=self,
-            optimizer=self.optimizer
-        )
-
         card = tf.data.experimental.cardinality(train_ds).numpy()
         if card < 0 or card == tf.data.experimental.UNKNOWN_CARDINALITY:
             card = 0
@@ -113,10 +108,7 @@ class LSTM_VAE(keras.Model):
         train_size = int(0.8 * card)
         train_split = train_ds.take(train_size)
         val_split = train_ds.skip(train_size)
-        val_ds = val_split.batch(self.batch_size)
-
-        manager = tf.train.CheckpointManager(
-            ckpt, './checkpoint_states/LSTM-VAE', max_to_keep=1)
+        val_ds = val_split.batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
 
         @tf.function
         def train_step(x, kl_anneal_factor):
@@ -161,7 +153,7 @@ class LSTM_VAE(keras.Model):
             kl_anneal_factor = tf.constant(
                 self.kl_annealing(epoch), dtype=tf.float32)
 
-            train_ds = train_split.shuffle(1000).batch(self.batch_size)
+            train_ds = train_split.shuffle(1000).batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
             for x in train_ds:
                 train_step(x, kl_anneal_factor)
             for x in val_ds:
@@ -173,14 +165,12 @@ class LSTM_VAE(keras.Model):
                     f"\t Train Loss: {train_losses.result():.6f} | Val Loss: {val_losses.result():.6f}")
             if best_val_loss - val_losses.result() > 1e-5:
                 best_val_loss = val_losses.result()
-                manager.save()
                 wait = 0
             else:
                 wait += 1
                 if wait >= self.early_stop_patience:
                     if verbose > 0:
                         print("Early stopping ... ")
-                    ckpt.restore(manager.latest_checkpoint)
                     break
 
     def score(self, data_ds):
