@@ -97,10 +97,10 @@ class LSTM_CBCL(keras.Model):
         
         self.centroid = None
         self.weight_mse = 1.0
-        self.weight_contrast = 0.3
-        self.weight_centroid = 0.1
-        self.weight_repel = 0.15
-        self.ema_momentum = 0.95
+        self.weight_contrast = 0.08
+        self.weight_centroid = 0.5
+        self.weight_repel = 0.3
+        self.ema_momentum = 0.99
         self.clip_norm=5
         self.patience = patience
         
@@ -125,8 +125,11 @@ class LSTM_CBCL(keras.Model):
         pos1 = self.pos_aug1(batch_windows, nv=self.nv_pos_aug1, p=self.p_pos1,
                              sigma=self.noise_sigma, random_state=random_state)
         
-        pos2 = self.pos_aug2(batch_windows, nv=self.nv_pos_aug2, p=self.p_pos2,
-                             random_state=random_state + 1)
+        """ pos2 = self.pos_aug2(batch_windows, nv=self.nv_pos_aug2, p=self.p_pos2,
+                             random_state=random_state + 1) """
+                             
+        pos2 = self.pos_aug1(batch_windows, nv=self.nv_pos_aug1, p=self.p_pos1,
+                             sigma=self.noise_sigma, random_state=random_state+1)
         
         # produce two negative (anomalous) views (these should make "bad" examples)
         neg1 = self.neg_aug1(batch_windows, nv=self.nv_neg_aug1, p=self.p_neg1,
@@ -175,8 +178,8 @@ class LSTM_CBCL(keras.Model):
         return loss
     
     @tf.function  
-    def contrastive_loss(self, orig, pos_proj, neg_proj, tau=0.1):
-        pos_proj = tf.concat([orig, pos_proj], axis=0)   # first block = positives (orig + views)
+    def contrastive_loss(self, orig_proj, pos_proj, neg_proj, tau=0.1):
+        """ #pos_proj = tf.concat([orig_proj, pos_proj], axis=0)   # first block = positives (orig + views) # Can test removal of orig from positives block as an ablation
         Z = tf.concat([pos_proj, neg_proj], axis=0)      # full set
         Npos = tf.shape(pos_proj)[0]
         M = tf.shape(Z)[0]
@@ -205,17 +208,17 @@ class LSTM_CBCL(keras.Model):
         pos_count = tf.reduce_sum(mask_pos, axis=1)                        # should be Npos - 1 (or K*N - 1)
         mean_log_prob_per_row = sum_log_prob_pos / (pos_count + 1e-8)
         loss = -tf.reduce_mean(mean_log_prob_per_row)
-        return loss
+        return loss """
     
-        """ ############## EXPERIMENTAL ###############
-        N = tf.shape(orig)[0]
+        ############## EXPERIMENTAL ###############
+        N = tf.shape(orig_proj)[0]
         view1, view2 = tf.split(pos_proj, 2, axis=0)    # each (N, D)
-        Z = tf.concat([orig, view1, view2, neg_proj], axis=0)
+        Z = tf.concat([orig_proj, view1, view2, neg_proj], axis=0)
         M = tf.shape(Z)[0]
 
         # normalize
         Z_norm = tf.math.l2_normalize(Z, axis=1)
-        anchors = tf.math.l2_normalize(orig, axis=1)    # (N, D)
+        anchors = tf.math.l2_normalize(orig_proj, axis=1)    # (N, D)
 
         logits = tf.matmul(anchors, Z_norm, transpose_b=True) / tf.cast(tau, dtype=anchors.dtype)  # (N, M)
 
@@ -240,7 +243,7 @@ class LSTM_CBCL(keras.Model):
         pos_count = tf.reduce_sum(mask_pos, axis=1)                  # should be 2 for all anchors
         mean_log_prob = log_prob_pos / (pos_count + 1e-8)
         loss = -tf.reduce_mean(mean_log_prob)
-        return loss """
+        return loss
 
         
     @tf.function
@@ -292,7 +295,7 @@ class LSTM_CBCL(keras.Model):
                 mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
                 contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
                 centroid_loss = self.centroid_loss(pos_projected)
-                hinge_loss = self.hinge_repel(neg_projected, dist_repel=1.5)
+                hinge_loss = self.hinge_repel(neg_projected, dist_repel=1)
                 other_losses = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
                 total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_losses
             
@@ -317,7 +320,7 @@ class LSTM_CBCL(keras.Model):
             mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
             contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
             centroid_loss = self.centroid_loss(pos_projected)
-            hinge_loss = self.hinge_repel(neg_projected, dist_repel=1.5)
+            hinge_loss = self.hinge_repel(neg_projected, dist_repel=1)
             other_loss = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
             total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_loss
             
@@ -335,8 +338,8 @@ class LSTM_CBCL(keras.Model):
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
                     neg_batch, dtype=tf.float32)
-                #tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
-                tau = 0.1
+                tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
+                #tau = 0.1
                 total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss = train_step(batch, pos_batch_tf, neg_batch_tf, clipping=clipping, tau=tau)
 
             for idx, batch in enumerate(val_ds):
@@ -347,8 +350,8 @@ class LSTM_CBCL(keras.Model):
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
                     neg_batch, dtype=tf.float32)
-                #tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
-                val_loss = val_step(batch, pos_batch_tf, neg_batch_tf, tau=0.1)
+                tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
+                val_loss = val_step(batch, pos_batch_tf, neg_batch_tf, tau=tau)
 
             cur_val = val_losses.result().numpy()
             if verbose:
@@ -356,7 +359,7 @@ class LSTM_CBCL(keras.Model):
                 print(f'\t Breakdown: \n\t MSE: {mse_loss:.6f}, Contrastive: {contrast_loss:.6f}, Cluster: {centroid_loss:.6f}, Hinge: {hinge_loss:.6f}')
 
             # checkpointing + early stopping
-            if best_val_loss - cur_val > 1e-4:
+            if best_val_loss - cur_val > 1e-3:
                 best_val_loss = cur_val
                 wait = 0
                 manager.save()

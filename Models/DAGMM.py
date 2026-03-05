@@ -11,10 +11,7 @@ class DAGMM_encoder(keras.Model):
         self.latent_dim = latent_dim
 
         self.encoder = keras.Sequential([
-            keras.layers.LSTM(hidden_unit, return_sequences=True,
-                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
-                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
-            keras.layers.LSTM(latent_dim, return_sequences=False,
+            keras.layers.LSTM(hidden_unit, return_sequences=False,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
         ])

@@ -11,21 +11,13 @@ class USAD_MTS(keras.Model):
         self.latent_dim = latent_dim
         self.batch_size = batch_size
         self.encoder = keras.Sequential([
-            keras.layers.LSTM(128, return_sequences=True,
-                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
-                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
-            keras.layers.LSTM(32, return_sequences=True,
-                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
-                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
-            keras.layers.LSTM(latent_dim, return_sequences=False,
+            keras.layers.LSTM(128, return_sequences=False,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
         ])
 
         self.decoder1 = keras.Sequential([
             keras.layers.RepeatVector(timesteps),
-            keras.layers.LSTM(32, return_sequences=True,
-                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate, recurrent_regularizer=keras.regularizers.L2(1e-4)),
             keras.layers.LSTM(128, return_sequences=True,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
@@ -35,8 +27,6 @@ class USAD_MTS(keras.Model):
 
         self.decoder2 = keras.Sequential([
             keras.layers.RepeatVector(timesteps),
-            keras.layers.LSTM(32, return_sequences=True,
-                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate, recurrent_regularizer=keras.regularizers.L2(1e-4)),
             keras.layers.LSTM(128, return_sequences=True,
                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),

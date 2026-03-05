@@ -24,10 +24,7 @@ class VAE_encoder(keras.Model):
         self.n_features = n_features
         self.latent_dim = hidden_dim
 
-        self.lstm_encoder = keras.Sequential([keras.layers.LSTM(lstm_h_dim, return_sequences=True,
-                                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
-                                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
-                                              keras.layers.LSTM(int(lstm_h_dim/2), return_sequences=False,
+        self.lstm_encoder = keras.Sequential([keras.layers.LSTM(lstm_h_dim, return_sequences=False,
                                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
                                               recurrent_regularizer=tf.keras.regularizers.L2(1e-4))])
         self.z_mean = keras.layers.Dense(hidden_dim)
@@ -52,10 +49,7 @@ class VAE_decoder(keras.Model):
         self.repeat = keras.layers.RepeatVector(timesteps)
         self.lstm_decoder = keras.Sequential([keras.layers.LSTM(lstm_h_dim, return_sequences=True,
                                               kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
-                                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4)),
-                                              keras.layers.LSTM(int(lstm_h_dim/2), return_sequences=True,
-                                              kernel_regularizer=kernel_regularizer, dropout=dropout_rate,
-                                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4))])
+                                              recurrent_regularizer=tf.keras.regularizers.L2(1e-4))])                
 
         self.x_mean = keras.layers.TimeDistributed(
             keras.layers.Dense(n_features), name='x_mean')
