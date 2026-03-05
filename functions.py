@@ -4,7 +4,7 @@ import datetime
 import os
 import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
-from sklearn.metrics import precision_recall_curve, average_precision_score, roc_curve, roc_auc_score, f1_score
+from sklearn.metrics import precision_recall_curve, average_precision_score, roc_curve, roc_auc_score, f1_score, precision_score, recall_score
 from keras.metrics import BinaryAccuracy, Precision, Recall, AUC
 from numpy.lib.stride_tricks import sliding_window_view
 import tensorflow as tf
@@ -251,23 +251,38 @@ def display_f1_models(y_tests, model_preds: dict, save=False, save_path='f1_comp
         _type_: _description_
     """
     plt.figure(figsize=(10, 8))
-    f1s = []
+    metrics = {"f1": [], "precision": [], "recall": []}
     models = []
     for model_name, y_preds in model_preds.items():
-        f1s.append(f1_score(y_tests, y_preds))
+        metrics["f1"].append(f1_score(y_tests, y_preds))
+        metrics["precision"].append(precision_score(y_tests, y_preds))
+        metrics["recall"].append(recall_score(y_tests, y_preds))
         models.append(model_name)
 
-    plt.bar(models, f1s)
-    plt.xlabel('Models')
-    plt.ylabel('F1-score')
+    x = np.arange(len(models))
+    bar_width = 0.25
+    offsets = [-bar_width, 0, bar_width]
+    colors = ["steelblue", "darkorange", "mediumseagreen"]
+    labels = ["F1-score", "Precision", "Recall"]
+    
+    for i, (key, color, label) in enumerate(zip(metrics, colors, labels)):
+        plt.bar(x + offsets[i], metrics[key], width=bar_width, color=color, label=label)
+        
+    plt.xticks(x, models)
+    plt.xlabel("Models")
+    plt.ylabel("Score")
     plt.ylim(0, 1)
-    plt.title('F1-score Comparison')
-    plt.grid()
+    plt.title("F1-score, Precision & Recall Comparison")
+    plt.legend(loc="lower right")
+    plt.grid(axis="y")
+
     if save:
         plt.savefig(save_path)
     else:
         plt.show()
-    return dict(zip(models, f1s))
+    return {
+        model: {"f1": f1, "precision": p, "recall": r} for model, f1, p, r in zip(models, metrics["f1"], metrics["precision"], metrics["recall"])
+    }
 
 
 def compare_pr_models(y_tests, model_scores: dict, title='Precision-Recall Curve Comparison', save=False, save_path='pr_comparison.png'):
