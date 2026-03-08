@@ -216,9 +216,11 @@ class LSTM_CBCL(keras.Model):
 
         
     @tf.function
-    def centroid_loss(self, pos_proj):
+    def centroid_loss(self, orig_proj, pos_proj):
         centroid = self.centroid.read_value()[None, :]
-        return tf.reduce_mean(tf.reduce_sum(tf.square(pos_proj - centroid), axis=1))
+        orig_loss = tf.reduce_mean(tf.reduce_sum(tf.square(orig_proj - centroid), axis=1))
+        pos_loss = tf.reduce_mean(tf.reduce_sum(tf.square(pos_proj - centroid), axis=1))
+        return orig_loss + pos_loss
     
     @tf.function
     def hinge_repel(self, neg_proj, dist_repel=1.0):
@@ -259,7 +261,7 @@ class LSTM_CBCL(keras.Model):
                 
                 mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
                 contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
-                centroid_loss = self.centroid_loss(pos_projected)
+                centroid_loss = self.centroid_loss(orig_projected, pos_projected)
                 hinge_loss = self.hinge_repel(neg_projected, dist_repel=1)
                 other_losses = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
                 total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_losses
