@@ -240,13 +240,15 @@ class LSTM_CBCL(keras.Model):
                 card += 1
         train_size = int(0.75 * card)
         train_split = train_ds.take(train_size)
+        drop = train_split.cardinality() >= self.batch_size
+
         val_ds = train_ds.skip(train_size).batch(
-            self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+            self.batch_size, drop_remainder=drop).prefetch(tf.data.AUTOTUNE)
 
         best_val_loss = float('inf')
         wait = 0
 
-        self.compute_center(train_split.shuffle(10000).batch(self.batch_size, drop_remainder=True))
+        self.compute_center(train_split.shuffle(10000).batch(self.batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE))
         
         @tf.function
         def train_step(orig, pos_batch, neg_batch, clipping=False, tau=0.1):
@@ -268,7 +270,7 @@ class LSTM_CBCL(keras.Model):
                 grad, _ = tf.clip_by_global_norm(grad, self.clip_norm)
             self.optimizer.apply_gradients(zip(grad, train_vars))
 
-            batch_mean = tf.reduce_mean(pos_projected, axis=0)
+            batch_mean = tf.reduce_mean(orig_projected, axis=0)
             self.centroid.assign(self.ema_momentum * self.centroid.read_value() + (1.0-self.ema_momentum) * batch_mean)
             
             train_losses.update_state(total_loss)
@@ -292,10 +294,9 @@ class LSTM_CBCL(keras.Model):
         for e in range(epochs):
             train_losses.reset_states()
             val_losses.reset_states()
-            train_ds = train_split.shuffle(10000).batch(self.batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
+            train_ds = train_split.shuffle(10000).batch(self.batch_size, drop_remainder=drop).prefetch(tf.data.AUTOTUNE)
             for idx, batch in enumerate(train_ds):
-                batch_np = batch.numpy()
-                pos_batch, neg_batch = self.create_augments(batch_np)
+                pos_batch, neg_batch = self.create_augments(batch.numpy())
                 pos_batch_tf = tf.convert_to_tensor(
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
@@ -305,8 +306,7 @@ class LSTM_CBCL(keras.Model):
                 total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss = train_step(batch, pos_batch_tf, neg_batch_tf, clipping=clipping, tau=tau)
 
             for idx, batch in enumerate(val_ds):
-                batch_np = batch.numpy()
-                pos_batch, neg_batch = self.create_augments(batch_np)
+                pos_batch, neg_batch = self.create_augments(batch.numpy())
 
                 pos_batch_tf = tf.convert_to_tensor(
                     pos_batch, dtype=tf.float32)
@@ -332,30 +332,24 @@ class LSTM_CBCL(keras.Model):
                     break
     
     def score(self, data_ds, use_mse=True):
-        mse_scores = []
-        cluster_scores = []
-        ds = data_ds.batch(1024)
+        mse_list, cluster_list = [], []
         centroid = self.centroid.read_value()[None, :]
-        for batch in ds:
-            latents, projected, reconstructed  = self(batch, training=False)
-            mse = tf.reduce_mean(tf.square(batch - reconstructed), axis=[1,2])
-            dist = tf.reduce_sum(tf.square(projected - centroid), axis=1)
-            mse_scores.extend(mse.numpy())
-            cluster_scores.extend(dist.numpy())
-
-        mse_scores = np.array(mse_scores)
-        cluster_scores = np.array(cluster_scores)
-        
-        return cluster_scores
+        for batch in data_ds.batch(1024):
+            _, projected, reconstructed = self(batch, training=False)
+            mse_list.append(tf.reduce_mean(tf.square(batch - reconstructed), axis=[1,2]))
+            cluster_list.append(tf.reduce_sum(tf.square(projected - centroid), axis=1))
+        return tf.concat(cluster_list, axis=0).numpy()
         #return mse_scores
         
     def compute_center(self, train_ds, eps=0.1):
-        embs = []
+        running_sum = None
+        count = 0
         for batch in train_ds:
-            latents, projected, reconstructed  = self(batch, training=False)
-            embs.append(projected)
-        stacked = tf.concat(embs, axis=0)
-        center = tf.reduce_mean(stacked, axis=0)
+            _, projected, _ = self(batch, training=False)
+            batch_sum = tf.reduce_sum(projected, axis=0)
+            running_sum = batch_sum if running_sum is None else running_sum + batch_sum
+            count += tf.shape(projected)[0]
+        center = running_sum / tf.cast(count, tf.float32)
         if self.centroid is not None:
             self.centroid.assign(center)
         else:
