@@ -12,7 +12,7 @@ import pickle
 
 
 class MLPProjector(keras.layers.Layer):
-    def __init__(self, hidden_units=32, out_dim=64, use_bias=True, leaky_alpha=0.01, **kwargs):
+    def __init__(self, hidden_units=32, out_dim=64, **kwargs):
         super().__init__(**kwargs)
 
         self.model = keras.Sequential([
@@ -30,25 +30,25 @@ class StackedEncoder(keras.layers.Layer):
                  **kwargs):
         super().__init__(**kwargs) 
         self.latent_output_shape = latent_dim 
-        self.layers = []
+        self._layers = []
         for i in range(num_hidden_layers):
             hu = int(hidden_units / (i+1)) if bottleneck else hidden_units
-            self.layers.append(
+            self._layers.append(
                 keras.layers.LSTM(hu, return_sequences=True, kernel_initializer=tf.keras.initializers.GlorotUniform(), dropout=dropout_rate,
                                   recurrent_initializer=tf.keras.initializers.Orthogonal(), kernel_regularizer=kernel_regularizer,
                                   recurrent_regularizer=recurrent_regularizer)
             )
-        self.layers.append(
+        self._layers.append(
                 keras.layers.LSTM(latent_dim, return_sequences=False, kernel_initializer=tf.keras.initializers.GlorotUniform(), dropout=dropout_rate,
                                   recurrent_initializer=tf.keras.initializers.Orthogonal(), kernel_regularizer=kernel_regularizer,
                                   recurrent_regularizer=recurrent_regularizer)
             )
         
-        self.model = keras.Sequential(self.layers)
+        self._model = keras.Sequential(self._layers)
         
     def call(self, x, training=False):
-        return self.model(x, training=training)
-    
+        return self._model(x, training=training)
+
 class StackedDecoder(keras.layers.Layer):
     def __init__(self, out_dim, timesteps, num_hidden_layers=2, bottleneck=False, hidden_units=64, dropout_rate=0.2, kernel_regularizer=None, recurrent_regularizer=None, 
             **kwargs):
@@ -56,21 +56,21 @@ class StackedDecoder(keras.layers.Layer):
         assert out_dim is not None, "Must specify original non-encoded feature dimension"
         assert timesteps is not None, "Must specify window frame size"
         self.output_dim = out_dim 
-        self.layers = [keras.layers.RepeatVector(timesteps)]
+        self._layers = [keras.layers.RepeatVector(timesteps)]
         
         for i in range(num_hidden_layers-1, -1, -1):
             hu = int(hidden_units / (i+1)) if bottleneck else hidden_units
-            self.layers.append(
+            self._layers.append(
                 keras.layers.LSTM(hu, return_sequences=True, kernel_initializer=tf.keras.initializers.GlorotUniform(), dropout=dropout_rate,
                                   recurrent_initializer=tf.keras.initializers.Orthogonal(), kernel_regularizer=kernel_regularizer,
                                   recurrent_regularizer=recurrent_regularizer)
             )
-        self.layers.append(keras.layers.TimeDistributed(
+        self._layers.append(keras.layers.TimeDistributed(
                 keras.layers.Dense(out_dim, activation='linear')))    
-        self.model = keras.Sequential(self.layers)
+        self._model = keras.Sequential(self._layers)
         
     def call(self, x, training=False):
-        return self.model(x, training=training)
+        return self._model(x, training=training)
     
 
 class LSTM_CBCL(keras.Model):
@@ -88,7 +88,7 @@ class LSTM_CBCL(keras.Model):
                                       kernel_regularizer=tf.keras.regularizers.L2(1e-4) if kernel_regularizer else None, 
                                       recurrent_regularizer=tf.keras.regularizers.L2(1e-4) if recurrent_regularizer else None)
         
-        self.projector_head = MLPProjector(hidden_units=MLP_hu, out_dim=rep_dim, use_bias=True, leaky_alpha=0.1)
+        self.projector_head = MLPProjector(hidden_units=MLP_hu, out_dim=rep_dim)
         
         self.pos_aug1 = functions.AnomalyWindowSampler().augment_noise
         self.pos_aug2 = functions.AnomalyWindowSampler().augment_dropout_point
@@ -96,8 +96,8 @@ class LSTM_CBCL(keras.Model):
         self.neg_aug2 = functions.AnomalyWindowSampler().augment_amplify
         
         self.centroid = None
-        self.weight_mse = 1.0
-        self.weight_contrast = 0.08
+        self.weight_mse = 0.0
+        self.weight_contrast = 0.15
         self.weight_centroid = 0.5
         self.weight_repel = 0.3
         self.ema_momentum = 0.99
@@ -116,6 +116,19 @@ class LSTM_CBCL(keras.Model):
     
         return latents, projected, reconstructed
     
+    
+    def encode(self, x, training=False):
+        latents = self.encoder(x, training=training)
+        return latents
+    
+    def project(self, z, training=False):
+        projected = self.projector_head(z, training=training)
+        return projected
+    
+    def decode(self, z, training):
+        reconstructed = self.decoder(z, training=training)
+        return reconstructed
+
     def create_augments(self, batch_windows,random_state=123):
         if isinstance(batch_windows, tf.Tensor):
             batch_windows = batch_windows.numpy()
@@ -177,6 +190,9 @@ class LSTM_CBCL(keras.Model):
         loss = tf.reduce_mean(tf.square(orig - recons))
         return loss
     
+    def _normalize(self, x):
+        return tf.math.l2_normalize(x, axis=1)
+    
     @tf.function  
     def contrastive_loss(self, orig_proj, pos_proj, neg_proj, tau=0.1):  
         ############## EXPERIMENTAL ###############
@@ -216,17 +232,16 @@ class LSTM_CBCL(keras.Model):
 
         
     @tf.function
-    def centroid_loss(self, orig_proj, pos_proj):
+    def centroid_loss(self, orig_proj):
         centroid = self.centroid.read_value()[None, :]
         orig_loss = tf.reduce_mean(tf.reduce_sum(tf.square(orig_proj - centroid), axis=1))
-        pos_loss = tf.reduce_mean(tf.reduce_sum(tf.square(pos_proj - centroid), axis=1))
-        return orig_loss + pos_loss
+        return orig_loss 
     
     @tf.function
     def hinge_repel(self, neg_proj, dist_repel=1.0):
         if neg_proj is None:
             return tf.constant(0.0)
-        d = tf.norm(neg_proj - self.centroid.read_value()[None, :], axis=1)        # (Bneg,)
+        d = tf.reduce_sum(tf.square(neg_proj - self.centroid.read_value()[None, :]), axis=1)       # (Bneg,)
         hinge = tf.nn.relu(dist_repel - d)                            # positive if within radius
         return tf.reduce_mean(tf.square(hinge))
     
@@ -255,16 +270,21 @@ class LSTM_CBCL(keras.Model):
         @tf.function
         def train_step(orig, pos_batch, neg_batch, clipping=False, tau=0.1):
             with tf.GradientTape() as tape:
-                pos_latents, pos_projected, pos_reconstructed = self(pos_batch, training=True)
-                neg_latents, neg_projected, neg_reconstructed = self(neg_batch, training=True)
-                orig_latents, orig_projected, orig_reconstructed = self(orig, training=True)
+                orig_latents = self.encoder(orig, training=True)
+                pos_latents = self.encoder(pos_batch, training=True)
+                #neg_latents = tf.stop_gradient(self.encoder(neg_batch, training=False))
+                neg_latents = self.encoder(neg_batch, training=True)
+                orig_projected = self.projector_head(orig_latents, training=True)
+                pos_projected = self.projector_head(pos_latents, training=True)
+                neg_projected = self.projector_head(neg_latents, training=True)
+                orig_reconstructed = self.decoder(orig_latents, training=True)
                 
-                mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
-                contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
-                centroid_loss = self.centroid_loss(orig_projected, pos_projected)
-                hinge_loss = self.hinge_repel(neg_projected, dist_repel=1)
+                mse_loss = self.weight_mse * self.reconstruction_loss(orig, orig_reconstructed)
+                contrast_loss = self.weight_contrast * self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
+                centroid_loss = self.weight_centroid * self.centroid_loss(orig_projected)
+                hinge_loss = self.weight_repel * self.hinge_repel(neg_projected, dist_repel=1)
                 other_losses = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
-                total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_losses
+                total_loss = mse_loss + contrast_loss + centroid_loss + hinge_loss + other_losses
             
             train_vars = self.encoder.trainable_variables + self.decoder.trainable_variables + self.projector_head.trainable_variables
             grad = tape.gradient(total_loss, train_vars)
@@ -272,24 +292,29 @@ class LSTM_CBCL(keras.Model):
                 grad, _ = tf.clip_by_global_norm(grad, self.clip_norm)
             self.optimizer.apply_gradients(zip(grad, train_vars))
 
-            batch_mean = tf.reduce_mean(orig_projected, axis=0)
-            self.centroid.assign(self.ema_momentum * self.centroid.read_value() + (1.0-self.ema_momentum) * batch_mean)
+            self.ema_update_centroid(orig_projected)
             
             train_losses.update_state(total_loss)
-            return total_loss, self.weight_mse * mse_loss, self.weight_contrast * contrast_loss, self.weight_centroid * centroid_loss, self.weight_repel * hinge_loss
+            return total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss
 
         @tf.function
         def val_step(orig, pos_batch, neg_batch, tau=0.1):
-            pos_latents, pos_projected, pos_reconstructed = self(pos_batch, training=False)
-            neg_latents, neg_projected, neg_reconstructed = self(neg_batch, training=False)
-            orig_latents, orig_projected, orig_reconstructed = self(orig, training=False)
+            orig_latents = self.encoder(orig, training=False)
+            pos_latents = self.encoder(pos_batch, training=False)
+            neg_latents = self.encoder(neg_batch, training=False)
             
-            mse_loss = self.reconstruction_loss(orig, orig_reconstructed)
-            contrast_loss = self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
-            centroid_loss = self.centroid_loss(orig_projected, pos_projected)
-            hinge_loss = self.hinge_repel(neg_projected, dist_repel=1)
+            orig_projected = self.projector_head(orig_latents, training=False)
+            pos_projected = self.projector_head(pos_latents, training=False)
+            neg_projected = self.projector_head(neg_latents, training=False)
+            
+            orig_reconstructed = self.decoder(orig_latents, training=False)
+            
+            mse_loss = self.weight_mse * self.reconstruction_loss(orig, orig_reconstructed)
+            contrast_loss = self.weight_contrast * self.contrastive_loss(orig_projected, pos_projected, neg_projected, tau=tau)
+            centroid_loss = self.weight_centroid * self.centroid_loss(orig_projected)
+            hinge_loss = self.weight_repel * self.hinge_repel(neg_projected, dist_repel=1)
             other_loss = tf.add_n(self.encoder.losses + self.decoder.losses + self.projector_head.losses) if (self.encoder.losses or self.decoder.losses or self.projector_head.losses) else 0.0
-            total_loss = self.weight_mse * mse_loss + self.weight_contrast * contrast_loss + self.weight_centroid * centroid_loss + self.weight_repel * hinge_loss + other_loss
+            total_loss = mse_loss + contrast_loss + centroid_loss + hinge_loss + other_loss
             
             val_losses.update_state(total_loss)
 
@@ -298,24 +323,23 @@ class LSTM_CBCL(keras.Model):
             val_losses.reset_states()
             train_ds = train_split.shuffle(10000).batch(self.batch_size, drop_remainder=drop).prefetch(tf.data.AUTOTUNE)
             for idx, batch in enumerate(train_ds):
-                pos_batch, neg_batch = self.create_augments(batch.numpy())
+                pos_batch, neg_batch = self.create_augments(batch.numpy(), random_state=idx+e*1000)
                 pos_batch_tf = tf.convert_to_tensor(
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
                     neg_batch, dtype=tf.float32)
                 tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
-                #tau = 0.1
-                total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss = train_step(batch, pos_batch_tf, neg_batch_tf, clipping=clipping, tau=tau)
+                total_loss, mse_loss, contrast_loss, centroid_loss, hinge_loss = train_step(batch, pos_batch_tf, neg_batch_tf, clipping=clipping, tau=tf.constant(tau, dtype=tf.float32))
 
             for idx, batch in enumerate(val_ds):
-                pos_batch, neg_batch = self.create_augments(batch.numpy())
+                pos_batch, neg_batch = self.create_augments(batch.numpy(), random_state=idx+e*1000)
 
                 pos_batch_tf = tf.convert_to_tensor(
                     pos_batch, dtype=tf.float32)
                 neg_batch_tf = tf.convert_to_tensor(
                     neg_batch, dtype=tf.float32)
                 tau = self.cosine_tau_scheduler(e, base_tau=0.5, min_tau=0.05, last_epoch=epochs//2)
-                val_loss = val_step(batch, pos_batch_tf, neg_batch_tf, tau=tau)
+                val_loss = val_step(batch, pos_batch_tf, neg_batch_tf, tau=tf.constant(tau, dtype=tf.float32))
 
             cur_val = val_losses.result().numpy()
             if verbose:
@@ -333,21 +357,25 @@ class LSTM_CBCL(keras.Model):
                         print("Early stopping.")
                     break
     
-    def score(self, data_ds, use_mse=True):
-        mse_list, cluster_list = [], []
+    def score(self, data_ds):
+        cluster_list = []
         centroid = self.centroid.read_value()[None, :]
         for batch in data_ds.batch(1024):
-            _, projected, reconstructed = self(batch, training=False)
-            mse_list.append(tf.reduce_mean(tf.square(batch - reconstructed), axis=[1,2]))
+            projected = self.projector_head(self.encoder(batch, training=False), training=False)
             cluster_list.append(tf.reduce_sum(tf.square(projected - centroid), axis=1))
         return tf.concat(cluster_list, axis=0).numpy()
-        #return mse_scores
+        
+    def ema_update_centroid(self, orig_proj):
+        batch_mean = tf.reduce_mean(orig_proj, axis=0)
+        self.centroid.assign(
+                self.ema_momentum * self.centroid.read_value()  + (1.0 - self.ema_momentum) * batch_mean
+        )   
         
     def compute_center(self, train_ds, eps=0.1):
         running_sum = None
         count = 0
         for batch in train_ds:
-            _, projected, _ = self(batch, training=False)
+            projected = self.projector_head(self.encoder(batch, training=False), training=False)
             batch_sum = tf.reduce_sum(projected, axis=0)
             running_sum = batch_sum if running_sum is None else running_sum + batch_sum
             count += tf.shape(projected)[0]
